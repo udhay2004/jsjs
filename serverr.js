@@ -1,66 +1,40 @@
-/**
- * Comply Globally — Cloudflare Worker
- * Proxies requests to Anthropic API, keeping the API key secret.
- * 
- * DEPLOY STEPS:
- * 1. Go to https://workers.cloudflare.com and create a free account
- * 2. Click "Create Worker"
- * 3. Replace the default code with this entire file
- * 4. Click "Settings" → "Variables" → add secret:
- *    Variable name: ANTHROPIC_API_KEY
- *    Value: your sk-ant-... key
- * 5. Click "Save and Deploy"
- * 6. Copy the worker URL (e.g. https://comply-cv.yourname.workers.dev)
- * 7. Paste that URL into call.html where it says WORKER_URL
- */
+import express from 'express';
+import fetch from 'node-fetch';
+import cors from 'cors';
 
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS = 280;
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-// Your GitHub Pages domain — update this after deploying
-const ALLOWED_ORIGIN = 'https://YOUR_GITHUB_USERNAME.github.io';
+app.use(cors({ origin: '*', methods: ['POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
+app.use(express.json());
 
-export default {
-  async fetch(request, env) {
-    // Handle CORS preflight
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-        }
-      });
-    }
+app.get('/', (req, res) => {
+  res.json({ status: 'Dr. CV proxy is running', timestamp: new Date().toISOString() });
+});
 
-    if (request.method !== 'POST') {
-      return new Response('Method not allowed', { status: 405 });
-    }
+app.post('/chat', async (req, res) => {
+  const { system, messages } = req.body;
 
-    let body;
-    try {
-      body = await request.json();
-    } catch {
-      return new Response('Invalid JSON', { status: 400 });
-    }
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: { message: 'Missing messages array' } });
+  }
 
-    const { system, messages } = body;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: { message: 'API key not configured on server' } });
+  }
 
-    if (!messages || !Array.isArray(messages)) {
-      return new Response('Missing messages', { status: 400 });
-    }
-
-    // Forward to Anthropic with streaming
+  try {
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        'x-api-key': env.ANTHROPIC_API_KEY,
+        'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 280,
         system: system || '',
         messages: messages,
         stream: true,
@@ -69,19 +43,23 @@ export default {
 
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text();
-      return new Response(errText, {
-        status: anthropicRes.status,
-        headers: { 'Access-Control-Allow-Origin': '*' }
-      });
+      return res.status(anthropicRes.status).send(errText);
     }
 
-    // Stream the response back to the browser
-    return new Response(anthropicRes.body, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'no-cache',
-      },
-    });
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    anthropicRes.body.on('data', chunk => res.write(chunk));
+    anthropicRes.body.on('end', () => res.end());
+    anthropicRes.body.on('error', err => { console.error('Stream error:', err); res.end(); });
+
+  } catch (err) {
+    console.error('Proxy error:', err.message);
+    res.status(500).json({ error: { message: err.message } });
   }
-};
+});
+
+app.listen(PORT, () => {
+  console.log(`Comply CV proxy running on port ${PORT}`);
+});
