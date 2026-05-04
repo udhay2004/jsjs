@@ -2,13 +2,13 @@ import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
-// Health check — also used by the client to wake the server from Render sleep
+// Health check — also wakes the server from Render sleep
 app.get('/', (req, res) => {
   res.json({ status: 'Dr. CV proxy is running', timestamp: new Date().toISOString() });
 });
@@ -29,24 +29,25 @@ app.post('/chat', async (req, res) => {
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
+        'x-api-key':          apiKey,
+        'anthropic-version':  '2023-06-01',
+        'content-type':       'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        // ── WHY 600? ──────────────────────────────────────────────────────
-        // A normal mid-conversation reply uses ~60-120 tokens.
-        // The CLOSING response = goodbye message (~100 tokens) +
-        // SCORE_JSON block (~150 tokens) = ~250 tokens minimum.
-        // 280 was cutting off the SCORE_JSON before it could be parsed,
-        // so scores always came back as 0. 600 gives plenty of headroom
-        // for even the most detailed closing without wasting money on
-        // normal turns (the model naturally stops at 60-120 tokens anyway).
-        max_tokens: 600,
-        system: system || '',
-        messages: messages,
-        stream: true,
+        model:      'claude-sonnet-4-20250514',
+        // ── WHY 1200? ──────────────────────────────────────────────────
+        // Normal mid-conversation reply: ~60–120 tokens.
+        // Closing response = goodbye message (~100 tokens)
+        //   + SCORE_JSON block (~150 tokens)
+        //   + safety buffer for detailed summaries = ~1200 tokens total.
+        // The previous limit of 600 was cutting off SCORE_JSON before
+        // it could be fully generated, causing scores to always be 0.
+        // The model naturally stops at 60–120 tokens on normal turns, so
+        // raising the ceiling costs nothing on ordinary exchanges.
+        max_tokens: 1200,
+        system:     system || '',
+        messages:   messages,
+        stream:     true,
       }),
     });
 
@@ -56,17 +57,14 @@ app.post('/chat', async (req, res) => {
       return res.status(anthropicRes.status).send(errText);
     }
 
-    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Content-Type',  'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Connection',    'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering on Render
 
-    anthropicRes.body.on('data', chunk => res.write(chunk));
-    anthropicRes.body.on('end', () => res.end());
-    anthropicRes.body.on('error', err => {
-      console.error('Stream error:', err);
-      res.end();
-    });
+    anthropicRes.body.on('data',  chunk => res.write(chunk));
+    anthropicRes.body.on('end',   ()    => res.end());
+    anthropicRes.body.on('error', err   => { console.error('Stream error:', err); res.end(); });
 
   } catch (err) {
     console.error('Proxy error:', err.message);
