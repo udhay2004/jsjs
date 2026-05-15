@@ -1,79 +1,111 @@
+/**
+ * Comply Globally — Dr. CV Voice Backend
+ * ─────────────────────────────────────────────────────
+ * Serves two purposes:
+ *   1. POST /session → mints an OpenAI Realtime ephemeral token
+ *      and returns it to the browser so WebRTC can connect directly
+ *      to OpenAI (browser ↔ OpenAI, audio never touches this server).
+ *   2. GET /         → health-check / keep-alive for Render.
+ *
+ * ENV VARS required on Render:
+ *   OPENAI_API_KEY   — your OpenAI secret key (NOT Anthropic)
+ *
+ * Optional:
+ *   PORT             — defaults to 3000
+ */
+
 import express from 'express';
-import fetch from 'node-fetch';
-import cors from 'cors';
+import cors    from 'cors';
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+/* ── Middleware ── */
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
-// Health check — also wakes the server from Render sleep
-app.get('/', (req, res) => {
-  res.json({ status: 'Dr. CV proxy is running', timestamp: new Date().toISOString() });
+/* ── Health check (also wakes Render from sleep) ── */
+app.get('/', (_req, res) => {
+  res.json({ status: 'Dr. CV proxy running', ts: new Date().toISOString() });
 });
 
-app.post('/chat', async (req, res) => {
-  const { system, messages } = req.body;
-
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: { message: 'Missing messages array' } });
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+/**
+ * POST /session
+ *
+ * Body (optional JSON):
+ *   { systemPrompt: string, voice: string }
+ *
+ * Mints a short-lived OpenAI Realtime ephemeral token via
+ * POST https://api.openai.com/v1/realtime/sessions
+ * and returns the full response to the browser.
+ *
+ * The browser then uses `client_secret.value` as the Bearer token
+ * for its WebRTC SDP exchange directly with OpenAI.
+ *
+ * Note: the system prompt / voice / VAD config are set here so the
+ * browser never needs to hold the real API key.
+ */
+app.post('/session', async (req, res) => {
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: { message: 'API key not configured on server' } });
+    return res.status(500).json({ error: 'OPENAI_API_KEY not set on server' });
   }
+
+  const { systemPrompt = '', voice = 'shimmer' } = req.body || {};
+
+  const sessionConfig = {
+    model: 'gpt-4o-realtime-preview-2024-12-17',
+    voice,
+
+    // System instructions go here — the browser never touches the key
+    instructions: systemPrompt || 'You are a helpful assistant.',
+
+    // Server-side VAD with generous pause thresholds so the user can
+    // pause mid-sentence without the model cutting in too quickly.
+    turn_detection: {
+      type:                    'server_vad',
+      threshold:               0.45,   // lower = more sensitive (default 0.5)
+      prefix_padding_ms:       400,    // audio before speech is captured
+      silence_duration_ms:     900,    // wait 900 ms of silence before ending turn
+      create_response:         true,   // auto-respond after each turn
+      interrupt_response:      true,   // allow user to barge in
+    },
+
+    // Request both audio + text so we can capture transcripts
+    modalities: ['audio', 'text'],
+
+    // Enable input audio transcription so we get user transcript events
+    input_audio_transcription: {
+      model: 'whisper-1',
+    },
+  };
 
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
+    const oaiRes = await fetch('https://api.openai.com/v1/realtime/sessions', {
+      method:  'POST',
       headers: {
-        'x-api-key':          apiKey,
-        'anthropic-version':  '2023-06-01',
-        'content-type':       'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type':  'application/json',
       },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
-        // ── WHY 1200? ──────────────────────────────────────────────────
-        // Normal mid-conversation reply: ~60–120 tokens.
-        // Closing response = goodbye message (~100 tokens)
-        //   + SCORE_JSON block (~150 tokens)
-        //   + safety buffer for detailed summaries = ~1200 tokens total.
-        // The previous limit of 600 was cutting off SCORE_JSON before
-        // it could be fully generated, causing scores to always be 0.
-        // The model naturally stops at 60–120 tokens on normal turns, so
-        // raising the ceiling costs nothing on ordinary exchanges.
-        max_tokens: 1200,
-        system:     system || '',
-        messages:   messages,
-        stream:     true,
-      }),
+      body: JSON.stringify(sessionConfig),
     });
 
-    if (!anthropicRes.ok) {
-      const errText = await anthropicRes.text();
-      console.error('Anthropic error:', anthropicRes.status, errText);
-      return res.status(anthropicRes.status).send(errText);
+    if (!oaiRes.ok) {
+      const errText = await oaiRes.text();
+      console.error('OpenAI session error:', oaiRes.status, errText);
+      return res.status(oaiRes.status).json({ error: errText });
     }
 
-    res.setHeader('Content-Type',  'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection',    'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering on Render
-
-    anthropicRes.body.on('data',  chunk => res.write(chunk));
-    anthropicRes.body.on('end',   ()    => res.end());
-    anthropicRes.body.on('error', err   => { console.error('Stream error:', err); res.end(); });
+    const data = await oaiRes.json();
+    // data.client_secret.value is the ephemeral token the browser needs
+    return res.json(data);
 
   } catch (err) {
-    console.error('Proxy error:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: { message: err.message } });
-    }
+    console.error('Session proxy error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Comply CV proxy running on port ${PORT}`);
+  console.log(`Comply Globally Dr.CV proxy → port ${PORT}`);
 });
