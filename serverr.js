@@ -56,25 +56,16 @@ app.post('/session', async (req, res) => {
   const sessionConfig = {
     model: 'gpt-4o-realtime-preview-2024-12-17',
     voice,
-
-    // System instructions go here — the browser never touches the key
     instructions: systemPrompt || 'You are a helpful assistant.',
-
-    // Server-side VAD with generous pause thresholds so the user can
-    // pause mid-sentence without the model cutting in too quickly.
     turn_detection: {
-      type:                    'server_vad',
-      threshold:               0.45,   // lower = more sensitive (default 0.5)
-      prefix_padding_ms:       400,    // audio before speech is captured
-      silence_duration_ms:     900,    // wait 900 ms of silence before ending turn
-      create_response:         true,   // auto-respond after each turn
-      interrupt_response:      true,   // allow user to barge in
+      type:                 'server_vad',
+      threshold:            0.45,
+      prefix_padding_ms:    400,
+      silence_duration_ms:  1200,
+      create_response:      true,
+      interrupt_response:   true,
     },
-
-    // Request both audio + text so we can capture transcripts
     modalities: ['audio', 'text'],
-
-    // Enable input audio transcription so we get user transcript events
     input_audio_transcription: {
       model: 'whisper-1',
     },
@@ -97,7 +88,6 @@ app.post('/session', async (req, res) => {
     }
 
     const data = await oaiRes.json();
-    // data.client_secret.value is the ephemeral token the browser needs
     return res.json(data);
 
   } catch (err) {
