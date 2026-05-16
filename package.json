@@ -1,16 +1,14 @@
 {
-  "name": "comply-cv-proxy",
+  "name": "drcv-backend",
   "version": "1.0.0",
   "type": "module",
-  "description": "Claude API proxy for Comply Globally Dr. CV",
-  "main": "server.js",
+  "main": "server.mjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.mjs"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^2.7.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
   },
   "engines": {
     "node": ">=18"
